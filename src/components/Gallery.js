@@ -1,8 +1,84 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Eye, Filter, Search, ShoppingCart, Sparkles, X, Heart } from 'lucide-react';
+import { Skeleton } from './ui/Loading';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Eye, Search, ShoppingCart, Sparkles, X, LayoutGrid, List, Columns } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { useMuseStore } from '../store/museStore';
+
 import FavoriteButton from './FavoriteButton';
+import ArtworkCard from './Gallery/ArtworkCard';
+import GalleryCarousel from './Gallery/GalleryCarousel';
+
+// ── Lazy loading hook ──────────────────────────────────────────────────────────
+function useLazyImage({ src, rootMargin = '200px' }) {
+  const ref = useRef(null);
+  const [inView, setInView] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isError, setIsError] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (!('IntersectionObserver' in window)) { setInView(true); return; }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setInView(true); observer.disconnect(); } },
+      { rootMargin }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [rootMargin]);
+
+  useEffect(() => {
+    if (!inView || !src) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => { if (!cancelled) setIsLoaded(true); };
+    img.onerror = () => { if (!cancelled) setIsError(true); };
+    img.src = src;
+    return () => { cancelled = true; img.onload = null; img.onerror = null; };
+  }, [inView, src]);
+
+  return { ref, isLoaded, isError };
+}
+
+// ── Lazy image component ───────────────────────────────────────────────────────
+function LazyArtworkImage({ src, alt, className = '', eager = false }) {
+  const { ref, isLoaded, isError } = useLazyImage({ src, rootMargin: eager ? '9999px' : '200px' });
+
+  return (
+    <div ref={ref} className={`relative h-full w-full overflow-hidden bg-gray-100 dark:bg-gray-800 ${className}`}>
+      {/* Skeleton shimmer — shown until image loads */}
+      {!isLoaded && !isError && (
+        <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700 bg-[length:200%_100%]" />
+      )}
+
+      {/* Error fallback */}
+      {isError && (
+        <div className="flex h-full items-center justify-center text-gray-400">
+          <Eye className="h-10 w-10" />
+        </div>
+      )}
+
+      {/* Image — blurred until fully loaded */}
+      {src && !isError && (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          className={`h-full w-full object-cover transition-all duration-500 group-hover:scale-105 ${
+            isLoaded ? 'opacity-100 blur-0 scale-100' : 'opacity-0 blur-sm scale-105'
+          }`}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatAddress(address = '') {
   if (!address) return 'Unknown creator';
@@ -58,17 +134,28 @@ const Gallery = () => {
   const buyArtwork = store.buyArtwork;
   const fetchAllArtworks = store.fetchAllArtworks || store.loadMarketplaceData;
 
+  const [viewMode, setViewMode] = useState(() => {
+    return localStorage.getItem('galleryViewMode') || 'grid';
+  });
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
   const [selectedAIModel, setSelectedAIModel] = useState('all');
+  const [artistQuery, setArtistQuery] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [minPrice, setMinPrice] = useState('');
   const [maxPrice, setMaxPrice] = useState('');
   const [sortBy, setSortBy] = useState('recent');
   const [page, setPage] = useState(1);
-  const [gridColumns, setGridColumns] = useState('grid-cols-1');
   const [selectedArtwork, setSelectedArtwork] = useState(null);
   const [purchaseArtwork, setPurchaseArtwork] = useState(null);
   const [purchaseState, setPurchaseState] = useState({ loading: false, error: '', success: '' });
+  const modalRef = useRef(null);
+  const purchaseModalRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('galleryViewMode', viewMode);
+  }, [viewMode]);
 
   useEffect(() => {
     if (fetchAllArtworks) {
@@ -76,17 +163,28 @@ const Gallery = () => {
     }
   }, [fetchAllArtworks]);
 
+  // Trap focus inside modal and close on Escape
   useEffect(() => {
-    const updateGridColumns = () => {
-      if (window.innerWidth < 640) setGridColumns('grid-cols-1');
-      else if (window.innerWidth < 1024) setGridColumns('md:grid-cols-2');
-      else setGridColumns('xl:grid-cols-3');
+    if (!selectedArtwork) return;
+    const el = modalRef.current;
+    if (el) el.focus();
+    const handleKey = (e) => {
+      if (e.key === 'Escape') setSelectedArtwork(null);
     };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [selectedArtwork]);
 
-    updateGridColumns();
-    window.addEventListener('resize', updateGridColumns);
-    return () => window.removeEventListener('resize', updateGridColumns);
-  }, []);
+  useEffect(() => {
+    if (!purchaseArtwork) return;
+    const el = purchaseModalRef.current;
+    if (el) el.focus();
+    const handleKey = (e) => {
+      if (e.key === 'Escape') { setPurchaseArtwork(null); setPurchaseState({ loading: false, error: '' }); }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [purchaseArtwork]);
 
   const normalizedArtworks = useMemo(
     () => artworks.map((artwork) => normalizeArtwork(artwork, listings)),
@@ -103,8 +201,11 @@ const Gallery = () => {
 
   const filteredArtworks = useMemo(() => {
     const search = query.trim().toLowerCase();
+    const artist = artistQuery.trim().toLowerCase();
     const min = Number(minPrice) || 0;
     const max = Number(maxPrice) || Number.POSITIVE_INFINITY;
+    const fromTs = dateFrom ? new Date(dateFrom).getTime() : 0;
+    const toTs = dateTo ? new Date(dateTo + 'T23:59:59').getTime() : Number.POSITIVE_INFINITY;
 
     const next = normalizedArtworks.filter((artwork) => {
       const matchesSearch =
@@ -112,6 +213,9 @@ const Gallery = () => {
         artwork.title.toLowerCase().includes(search) ||
         artwork.prompt.toLowerCase().includes(search) ||
         artwork.aiModel.toLowerCase().includes(search);
+
+      const matchesArtist =
+        !artist || artwork.creator.toLowerCase().includes(artist);
 
       const matchesFilter =
         filter === 'all' ||
@@ -126,7 +230,10 @@ const Gallery = () => {
       const priceValue = Number(artwork.price ?? 0);
       const matchesPrice = priceValue >= min && priceValue <= max;
 
-      return matchesSearch && matchesFilter && matchesAIModel && matchesPrice;
+      const createdTs = artwork.createdAt ? new Date(artwork.createdAt).getTime() : 0;
+      const matchesDate = createdTs >= fromTs && createdTs <= toTs;
+
+      return matchesSearch && matchesArtist && matchesFilter && matchesAIModel && matchesPrice && matchesDate;
     });
 
     next.sort((left, right) => {
@@ -139,7 +246,7 @@ const Gallery = () => {
     });
 
     return next;
-  }, [normalizedArtworks, query, filter, selectedAIModel, minPrice, maxPrice, sortBy]);
+  }, [normalizedArtworks, query, artistQuery, dateFrom, dateTo, filter, selectedAIModel, minPrice, maxPrice, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(filteredArtworks.length / 9));
 
@@ -203,109 +310,200 @@ const Gallery = () => {
         </div>
 
         <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-          <div className="grid gap-4 lg:grid-cols-3">
-            <div className="relative">
-              <label htmlFor="gallery-search" className="sr-only">Search artworks</label>
-              <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <div className="flex flex-col gap-4">
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="relative">
+                <label htmlFor="gallery-search" className="sr-only">Search artworks</label>
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                <input
+                  id="gallery-search"
+                  aria-label="Search artworks..."
+                  type="text"
+                  placeholder="Search artworks..."
+                  value={query}
+                  onChange={(event) => { setQuery(event.target.value); setPage(1); }}
+                  className="w-full rounded-2xl border border-gray-200 bg-gray-50 py-3 pl-11 pr-4 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="filter-ai-model" className="block text-xs font-medium text-gray-500">Filter by AI Model</label>
+                <select
+                  id="filter-ai-model"
+                  aria-label="Filter by AI Model"
+                  value={selectedAIModel}
+                  onChange={(event) => { setSelectedAIModel(event.target.value); setPage(1); }}
+                  className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                >
+                  <option value="all">All models</option>
+                  {availableAIModels.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="sort-by" className="block text-xs font-medium text-gray-500">Sort by</label>
+                <select
+                  id="sort-by"
+                  aria-label="Sort by"
+                  value={sortBy}
+                  onChange={(event) => { setSortBy(event.target.value); setPage(1); }}
+                  className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                >
+                  <option value="recent">Most recent</option>
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                  <option value="price-high">Price: high to low</option>
+                  <option value="price-low">Price: low to high</option>
+                  <option value="title">Title</option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="base-filter" className="block text-xs font-medium text-gray-500">Filter by Status</label>
+                <select
+                  id="base-filter"
+                  aria-label="Filter by Status"
+                  value={filter}
+                  onChange={(event) => { setFilter(event.target.value); setPage(1); }}
+                  className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                >
+                  <option value="all">All artworks</option>
+                  <option value="listed">Listed</option>
+                  <option value="unlisted">Unlisted</option>
+                  <option value="evolvable">Evolvable</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="min-price" className="block text-xs font-medium text-gray-500">Min Price</label>
+                  <input
+                    id="min-price"
+                    aria-label="Min Price"
+                    type="number"
+                    value={minPrice}
+                    min="0"
+                    step="0.01"
+                    onChange={(event) => { setMinPrice(event.target.value); setPage(1); }}
+                    className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="max-price" className="block text-xs font-medium text-gray-500">Max Price</label>
+                  <input
+                    id="max-price"
+                    aria-label="Max Price"
+                    type="number"
+                    value={maxPrice}
+                    min="0"
+                    step="0.01"
+                    onChange={(event) => { setMaxPrice(event.target.value); setPage(1); }}
+                    className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col">
+                <label className="block text-xs font-medium text-gray-500">View Mode</label>
+                <div className="mt-1 flex gap-2 rounded-2xl bg-gray-50 p-1 dark:bg-gray-950 border border-gray-200 dark:border-gray-700">
+                  <button
+                    onClick={() => setViewMode('grid')}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-2 text-sm font-semibold transition ${
+                      viewMode === 'grid' 
+                        ? 'bg-white text-purple-600 shadow-sm dark:bg-gray-800 dark:text-purple-400' 
+                        : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    <LayoutGrid className="h-4 w-4" />
+                    Grid
+                  </button>
+                  <button
+                    onClick={() => setViewMode('list')}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-2 text-sm font-semibold transition ${
+                      viewMode === 'list' 
+                        ? 'bg-white text-purple-600 shadow-sm dark:bg-gray-800 dark:text-purple-400' 
+                        : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    <List className="h-4 w-4" />
+                    List
+                  </button>
+                  <button
+                    onClick={() => setViewMode('carousel')}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-2 text-sm font-semibold transition ${
+                      viewMode === 'carousel' 
+                        ? 'bg-white text-purple-600 shadow-sm dark:bg-gray-800 dark:text-purple-400' 
+                        : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                    }`}
+                  >
+                    <Columns className="h-4 w-4" />
+                    Carousel
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="filter-artist" className="block text-xs font-medium text-gray-500">Filter by Artist</label>
               <input
-                id="gallery-search"
-                aria-label="Search artworks..."
+                id="filter-artist"
+                aria-label="Filter by artist"
                 type="text"
-                placeholder="Search artworks..."
-                value={query}
-                onChange={(event) => { setQuery(event.target.value); setPage(1); }}
-                className="w-full rounded-2xl border border-gray-200 bg-gray-50 py-3 pl-11 pr-4 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                placeholder="Artist address or name…"
+                value={artistQuery}
+                onChange={(event) => { setArtistQuery(event.target.value); setPage(1); }}
+                className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
               />
-            </div>
-
-            <div>
-              <label htmlFor="filter-ai-model" className="block text-xs font-medium text-gray-500">Filter by AI Model</label>
-              <select
-                id="filter-ai-model"
-                aria-label="Filter by AI Model"
-                value={selectedAIModel}
-                onChange={(event) => { setSelectedAIModel(event.target.value); setPage(1); }}
-                className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
-              >
-                <option value="all">All models</option>
-                {availableAIModels.map((model) => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="sort-by" className="block text-xs font-medium text-gray-500">Sort by</label>
-              <select
-                id="sort-by"
-                aria-label="Sort by"
-                value={sortBy}
-                onChange={(event) => { setSortBy(event.target.value); setPage(1); }}
-                className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
-              >
-                <option value="recent">Most recent</option>
-                <option value="newest">Newest first</option>
-                <option value="oldest">Oldest first</option>
-                <option value="price-high">Price: high to low</option>
-                <option value="price-low">Price: low to high</option>
-                <option value="title">Title</option>
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="base-filter" className="block text-xs font-medium text-gray-500">Filter by Status</label>
-              <select
-                id="base-filter"
-                aria-label="Filter by Status"
-                value={filter}
-                onChange={(event) => { setFilter(event.target.value); setPage(1); }}
-                className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
-              >
-                <option value="all">All artworks</option>
-                <option value="listed">Listed</option>
-                <option value="unlisted">Unlisted</option>
-                <option value="evolvable">Evolvable</option>
-              </select>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label htmlFor="min-price" className="block text-xs font-medium text-gray-500">Min Price</label>
+                <label htmlFor="date-from" className="block text-xs font-medium text-gray-500">Created From</label>
                 <input
-                  id="min-price"
-                  aria-label="Min Price"
-                  type="number"
-                  value={minPrice}
-                  min="0"
-                  step="0.01"
-                  onChange={(event) => { setMinPrice(event.target.value); setPage(1); }}
+                  id="date-from"
+                  aria-label="Created from date"
+                  type="date"
+                  value={dateFrom}
+                  onChange={(event) => { setDateFrom(event.target.value); setPage(1); }}
                   className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
                 />
               </div>
               <div>
-                <label htmlFor="max-price" className="block text-xs font-medium text-gray-500">Max Price</label>
+                <label htmlFor="date-to" className="block text-xs font-medium text-gray-500">Created To</label>
                 <input
-                  id="max-price"
-                  aria-label="Max Price"
-                  type="number"
-                  value={maxPrice}
-                  min="0"
-                  step="0.01"
-                  onChange={(event) => { setMaxPrice(event.target.value); setPage(1); }}
+                  id="date-to"
+                  aria-label="Created to date"
+                  type="date"
+                  value={dateTo}
+                  onChange={(event) => { setDateTo(event.target.value); setPage(1); }}
                   className="mt-1 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-gray-900 outline-none transition focus:border-purple-500 focus:ring-2 focus:ring-purple-200 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
                 />
               </div>
             </div>
           </div>
 
-          <p role="status" aria-live="polite" className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-            Showing {paginatedArtworks.length} of {filteredArtworks.length} artwork(s)
-          </p>
+            <p role="status" aria-live="polite" className="text-sm text-gray-600 dark:text-gray-300">
+              Showing {paginatedArtworks.length} of {filteredArtworks.length} artwork(s)
+            </p>
+          </div>
         </div>
 
         {isLoading ? (
-          <div className="rounded-3xl border border-gray-200 bg-white p-12 text-center shadow-sm dark:border-gray-800 dark:bg-gray-900">
-            <p className="text-lg font-semibold text-gray-900 dark:text-white">Loading gallery...</p>
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true" aria-label="Loading artworks">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900">
+                <Skeleton className="aspect-[4/3] w-full" />
+                <div className="space-y-3 p-5">
+                  <Skeleton className="h-6 w-3/4" />
+                  <Skeleton className="h-4 w-1/3" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-5/6" />
+                  <Skeleton className="mt-4 h-10 w-full rounded-2xl" />
+                </div>
+              </div>
+            ))}
           </div>
         ) : filteredArtworks.length === 0 ? (
           <div className="rounded-3xl border border-dashed border-gray-300 bg-white p-12 text-center shadow-sm dark:border-gray-700 dark:bg-gray-900">
@@ -316,132 +514,141 @@ const Gallery = () => {
             </p>
           </div>
         ) : (
-          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-            {paginatedArtworks.map((artwork) => (
-              <article
-                key={artwork.id}
-                data-testid={`artwork-card-${artwork.id}`}
-                className="group overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-xl dark:border-gray-800 dark:bg-gray-900"
-              >
-                <button
-                  type="button"
-                  onClick={() => setSelectedArtwork(artwork)}
-                  className="block w-full text-left"
+          <>
+            <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+              {paginatedArtworks.map((artwork) => (
+                <article
+                  key={artwork.id}
+                  data-testid={`artwork-card-${artwork.id}`}
+                  className="group overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-xl dark:border-gray-800 dark:bg-gray-900"
                 >
-                  <div className="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
-                    {artwork.image ? (
-                      <img
-                        src={artwork.image}
-                        alt={artwork.title}
-                        className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-gray-400">
-                        <Eye className="h-10 w-10" />
-                      </div>
-                    )}
-
-                    <div className="absolute left-4 top-4 flex flex-wrap gap-2">
-                      <span className="rounded-full bg-black/55 px-3 py-1 text-xs font-semibold text-white backdrop-blur-sm">
-                        {artwork.aiModel}
-                      </span>
-                      {artwork.canEvolve && (
-                        <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
-                          Evolvable
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Favorite button */}
-                    <div className="absolute right-4 top-4">
-                      <FavoriteButton 
-                        artworkId={artwork.id} 
-                        artworkTitle={artwork.title}
-                        size="sm"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-4 p-5">
-                    <div>
-                      <h2 className="text-xl font-bold text-gray-900 dark:text-white">{artwork.title}</h2>
-                      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{formatRelativeTime(artwork.createdAt)}</p>
-                    </div>
-
-                    <p className="line-clamp-2 text-sm text-gray-600 dark:text-gray-300">{artwork.prompt}</p>
-
-                    <div className="flex flex-wrap items-center gap-3 text-sm">
-                      <span className="rounded-full bg-purple-50 px-3 py-1 font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
-                        {artwork.humanContribution}% Human / {artwork.aiContribution}% AI
-                      </span>
-                      <span className="text-gray-500 dark:text-gray-400">
-                        {artwork.evolutionCount} Evolution{artwork.evolutionCount === 1 ? '' : 's'}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between border-t border-gray-100 pt-4 text-sm dark:border-gray-800">
-                      <div>
-                        <p className="text-xs uppercase tracking-wider text-gray-400">Creator</p>
-                        <p className="font-mono font-semibold text-gray-900 dark:text-white">{formatAddress(artwork.creator)}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs uppercase tracking-wider text-gray-400">Price</p>
-                        <p className="font-semibold text-gray-900 dark:text-white">
-                          {artwork.price !== null ? `${artwork.price} ETH` : 'Not listed'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </button>
-
-                <div className="border-t border-gray-100 p-5 pt-4 dark:border-gray-800">
                   <button
                     type="button"
-                    onClick={() => setPurchaseArtwork(artwork)}
-                    disabled={artwork.price === null}
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-600 to-blue-600 px-4 py-3 font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-400"
+                    onClick={() => setSelectedArtwork(artwork)}
+                    className="block w-full text-left"
                   >
-                    <ShoppingCart className="h-4 w-4" />
-                    Buy Now
+                    {/* ── CARD IMAGE (lazy) ── */}
+                    <div className="relative aspect-[4/3] overflow-hidden">
+                      {artwork.image ? (
+                        <LazyArtworkImage src={artwork.image} alt={artwork.title} />
+                      ) : (
+                        <div className="flex h-full items-center justify-center bg-gray-100 text-gray-400 dark:bg-gray-800">
+                          <Eye className="h-10 w-10" />
+                        </div>
+                      )}
+
+                      <div className="absolute left-4 top-4 flex flex-wrap gap-2">
+                        <span className="rounded-full bg-black/55 px-3 py-1 text-xs font-semibold text-white backdrop-blur-sm">
+                          {artwork.aiModel}
+                        </span>
+                        {artwork.canEvolve && (
+                          <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
+                            Evolvable
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="absolute right-4 top-4">
+                        <FavoriteButton
+                          artworkId={artwork.id}
+                          artworkTitle={artwork.title}
+                          size="sm"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 p-5">
+                      <div>
+                        <h2 className="text-xl font-bold text-gray-900 dark:text-white">{artwork.title}</h2>
+                        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{formatRelativeTime(artwork.createdAt)}</p>
+                      </div>
+
+                      <p className="line-clamp-2 text-sm text-gray-600 dark:text-gray-300">{artwork.prompt}</p>
+
+                      <div className="flex flex-wrap items-center gap-3 text-sm">
+                        <span className="rounded-full bg-purple-50 px-3 py-1 font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
+                          {artwork.humanContribution}% Human / {artwork.aiContribution}% AI
+                        </span>
+                        <span className="text-gray-500 dark:text-gray-400">
+                          {artwork.evolutionCount} Evolution{artwork.evolutionCount === 1 ? '' : 's'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-gray-100 pt-4 text-sm dark:border-gray-800">
+                        <div>
+                          <p className="text-xs uppercase tracking-wider text-gray-400">Creator</p>
+                          <p className="font-mono font-semibold text-gray-900 dark:text-white">{formatAddress(artwork.creator)}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs uppercase tracking-wider text-gray-400">Price</p>
+                          <p className="font-semibold text-gray-900 dark:text-white">
+                            {artwork.price !== null ? `${artwork.price} ETH` : 'Not listed'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </button>
-                </div>
-              </article>
-            ))}
-          </div>
 
-          {totalPages > 1 && (
-            <div className="mt-4 flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
-                disabled={page === 1}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              >
-                Previous
-              </button>
-
-              <span className="text-sm font-medium">Page {page} of {totalPages}</span>
-
-              <button
-                type="button"
-                onClick={() => setPage((prev) => Math.min(prev + 1, totalPages))}
-                disabled={page === totalPages}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              >
-                Next
-              </button>
+                  <div className="border-t border-gray-100 p-5 pt-4 dark:border-gray-800">
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseArtwork(artwork)}
+                      disabled={artwork.price === null}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-purple-600 to-blue-600 px-4 py-3 font-semibold text-white transition hover:opacity-95 disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-400"
+                    >
+                      <ShoppingCart className="h-4 w-4" />
+                      Buy Now
+                    </button>
+                  </div>
+                </article>
+              ))}
             </div>
-          )}
+
+            {totalPages > 1 && (
+              <div className="mt-4 flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={page === 1}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Previous
+                </button>
+
+                <span className="text-sm font-medium">Page {page} of {totalPages}</span>
+
+                <button
+                  type="button"
+                  onClick={() => setPage((prev) => Math.min(prev + 1, totalPages))}
+                  disabled={page === totalPages}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
+      {/* ── DETAIL MODAL IMAGE (lazy, eager-loads since it's above fold) ── */}
       {selectedArtwork && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-gray-900">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="artwork-modal-title"
+          onClick={(e) => { if (e.target === e.currentTarget) setSelectedArtwork(null); }}
+        >
+          <div
+            ref={modalRef}
+            tabIndex={-1}
+            className="w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl dark:bg-gray-900 outline-none"
+          >
             <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4 dark:border-gray-800">
               <div>
                 <p className="text-sm text-gray-500 dark:text-gray-400">Artwork Details</p>
-                <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{selectedArtwork.title}</h2>
+                <h2 id="artwork-modal-title" className="text-2xl font-bold text-gray-900 dark:text-white">{selectedArtwork.title}</h2>
               </div>
               <button
                 type="button"
@@ -454,11 +661,15 @@ const Gallery = () => {
             </div>
 
             <div className="grid gap-6 p-6 md:grid-cols-[1.1fr_0.9fr]">
-              <div className="overflow-hidden rounded-3xl bg-gray-100 dark:bg-gray-800">
+              <div className="overflow-hidden rounded-3xl">
                 {selectedArtwork.image ? (
-                  <img src={selectedArtwork.image} alt={selectedArtwork.title} className="h-full w-full object-cover" />
+                  <LazyArtworkImage
+                    src={selectedArtwork.image}
+                    alt={selectedArtwork.title}
+                    eager
+                  />
                 ) : (
-                  <div className="flex min-h-[280px] items-center justify-center text-gray-400">
+                  <div className="flex min-h-[280px] items-center justify-center bg-gray-100 text-gray-400 dark:bg-gray-800 rounded-3xl">
                     <Eye className="h-10 w-10" />
                   </div>
                 )}
@@ -501,9 +712,19 @@ const Gallery = () => {
       )}
 
       {purchaseArtwork && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900">
-            <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Confirm Purchase</h2>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="purchase-modal-title"
+          onClick={(e) => { if (e.target === e.currentTarget) { setPurchaseArtwork(null); setPurchaseState({ loading: false, error: '' }); } }}
+        >
+          <div
+            ref={purchaseModalRef}
+            tabIndex={-1}
+            className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 outline-none"
+          >
+            <h2 id="purchase-modal-title" className="text-2xl font-bold text-gray-900 dark:text-white">Confirm Purchase</h2>
             <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
               You are about to purchase <span className="font-semibold text-gray-900 dark:text-white">{purchaseArtwork.title}</span>.
             </p>
